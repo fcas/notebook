@@ -7,6 +7,7 @@ import {
   ITreePathUpdater,
   JupyterFrontEnd,
   JupyterFrontEndPlugin,
+  JupyterLab,
 } from '@jupyterlab/application';
 
 import {
@@ -15,6 +16,7 @@ import {
   ISanitizer,
   ISplashScreen,
   IToolbarWidgetRegistry,
+  showErrorMessage,
 } from '@jupyterlab/apputils';
 
 import { ConsolePanel } from '@jupyterlab/console';
@@ -36,7 +38,10 @@ import {
   standardRendererFactories,
 } from '@jupyterlab/rendermime';
 
-import { ISettingRegistry } from '@jupyterlab/settingregistry';
+import {
+  ISettingConnector,
+  ISettingRegistry,
+} from '@jupyterlab/settingregistry';
 
 import { ITranslator, nullTranslator } from '@jupyterlab/translation';
 
@@ -52,6 +57,8 @@ import {
 } from '@jupyter-notebook/application';
 
 import { jupyterIcon } from '@jupyter-notebook/ui-components';
+
+import { SettingConnector } from './settingconnector';
 
 import { PromiseDelegate } from '@lumino/coreutils';
 
@@ -83,6 +90,11 @@ const JUPYTERLAB_DOCMANAGER_PLUGIN_ID =
  * The command IDs used by the application plugin.
  */
 namespace CommandIDs {
+  /**
+   * Duplicate the current document and open the new document
+   */
+  export const duplicate = 'application:duplicate';
+
   /**
    * Handle local links
    */
@@ -151,6 +163,22 @@ const dirty: JupyterFrontEndPlugin<void> = {
         return ((event as any).returnValue = message);
       }
     });
+  },
+};
+
+/**
+ * The application info.
+ */
+const info: JupyterFrontEndPlugin<JupyterLab.IInfo> = {
+  id: '@jupyter-notebook/application-extension:info',
+  description: 'Provides application information for the current notebook app.',
+  autoStart: true,
+  provides: JupyterLab.IInfo,
+  activate: (app: JupyterFrontEnd): JupyterLab.IInfo => {
+    if (!(app instanceof NotebookApp)) {
+      throw new Error(`${info.id} must be activated in Jupyter Notebook.`);
+    }
+    return app.info;
   },
 };
 
@@ -246,6 +274,22 @@ const opener: JupyterFrontEndPlugin<void> = {
           });
         });
       },
+      describedBy: {
+        args: {
+          type: 'object',
+          properties: {
+            path: {
+              type: 'string',
+              description: 'The routed URL path to handle.',
+            },
+            search: {
+              type: 'string',
+              description: 'The routed URL query string.',
+            },
+          },
+          required: ['path'],
+        },
+      },
     });
 
     router.register({ command, pattern: TREE_PATTERN });
@@ -320,6 +364,12 @@ const pages: JupyterFrontEndPlugin<void> = {
       execute: () => {
         window.open(URLExt.join(baseUrl, 'lab'));
       },
+      describedBy: {
+        args: {
+          type: 'object',
+          properties: {},
+        },
+      },
     });
     const page = PageConfig.getOption('notebookPage');
 
@@ -327,10 +377,16 @@ const pages: JupyterFrontEndPlugin<void> = {
       label: trans.__('File Browser'),
       execute: () => {
         if (page === 'tree') {
-          app.commands.execute('filebrowser:activate');
+          app.commands.execute('filebrowser:open-directory');
         } else {
           window.open(URLExt.join(baseUrl, 'tree'));
         }
+      },
+      describedBy: {
+        args: {
+          type: 'object',
+          properties: {},
+        },
       },
     });
 
@@ -416,10 +472,30 @@ const rendermime: JupyterFrontEndPlugin<IRenderMimeRegistry> = {
               });
             });
         },
+        describedBy: {
+          args: {
+            type: 'object',
+            properties: {
+              path: {
+                type: 'string',
+                description: 'The local path to open.',
+              },
+            },
+            required: ['path'],
+          },
+        },
       });
     }
     return new RenderMimeRegistry({
       initialFactories: standardRendererFactories,
+      trustHandler: {
+        markTrusted: (node: HTMLElement) => {
+          app.commandLinker.markTrusted(node);
+        },
+        unmarkTrusted: (node: HTMLElement) => {
+          app.commandLinker.unmarkTrusted(node);
+        },
+      },
       linkHandler: !docManager
         ? undefined
         : {
@@ -429,9 +505,12 @@ const rendermime: JupyterFrontEndPlugin<IRenderMimeRegistry> = {
               if (node.tagName === 'A' && node.hasAttribute('download')) {
                 return;
               }
-              app.commandLinker.connectNode(node, CommandIDs.handleLink, {
-                path,
-                id,
+              node.addEventListener('click', (event: MouseEvent) => {
+                event.preventDefault();
+                void app.commands.execute(CommandIDs.handleLink, {
+                  path,
+                  id,
+                });
               });
             },
           },
@@ -615,6 +694,26 @@ const title: JupyterFrontEndPlugin<void> = {
         return !!(currentWidget && docManager.contextForWidget(currentWidget));
       };
 
+      commands.addCommand(CommandIDs.duplicate, {
+        label: () => trans.__('Duplicate'),
+        isEnabled,
+        execute: async () => {
+          if (!isEnabled()) {
+            return;
+          }
+
+          // Duplicate the file, and open the new file.
+          const result = await docManager.duplicate(current.context.path);
+          await commands.execute('docmanager:open', { path: result.path });
+        },
+        describedBy: {
+          args: {
+            type: 'object',
+            properties: {},
+          },
+        },
+      });
+
       commands.addCommand(CommandIDs.rename, {
         label: () => trans.__('Rename…'),
         isEnabled,
@@ -623,14 +722,23 @@ const title: JupyterFrontEndPlugin<void> = {
             return;
           }
 
-          const result = await renameDialog(docManager, current.context);
+          try {
+            const result = await renameDialog(docManager, current.context);
 
-          // activate the current widget to bring the focus
-          if (current) {
-            current.activate();
-          }
+            // activate the current widget to bring the focus
+            if (current) {
+              current.activate();
+            }
 
-          if (result === null) {
+            if (result === null) {
+              return;
+            }
+          } catch (error) {
+            showErrorMessage(
+              trans.__('Rename Error'),
+              (error as Error).message ||
+                trans.__('An error occurred while renaming the file.')
+            );
             return;
           }
 
@@ -650,6 +758,12 @@ const title: JupyterFrontEndPlugin<void> = {
           router.navigate(`/${route}/${encoded}`, {
             skipRouting: true,
           });
+        },
+        describedBy: {
+          args: {
+            type: 'object',
+            properties: {},
+          },
         },
       });
 
@@ -695,6 +809,12 @@ const topVisibility: JupyterFrontEndPlugin<void> = {
         }
       },
       isToggled: () => top.isVisible,
+      describedBy: {
+        args: {
+          type: 'object',
+          properties: {},
+        },
+      },
     });
 
     let adjustToScreen = false;
@@ -769,7 +889,7 @@ const sidePanelVisibility: JupyterFrontEndPlugin<void> = {
      * id, widget ID to activate in the side panel
      */
     app.commands.addCommand(CommandIDs.togglePanel, {
-      label: (args) => args['title'] as string,
+      label: (args) => trans.__('Show %1', args['title'] as string),
       caption: (args) => {
         // We do not substitute the parameter into the string because the parameter is not
         // localized (e.g., it is always 'left') even though the string is localized.
@@ -845,6 +965,27 @@ const sidePanelVisibility: JupyterFrontEndPlugin<void> = {
         }
         return false;
       },
+      describedBy: {
+        args: {
+          type: 'object',
+          properties: {
+            side: {
+              type: 'string',
+              enum: ['left', 'right'],
+              description: 'The side panel area to toggle.',
+            },
+            title: {
+              type: 'string',
+              description: 'The title of the side panel widget.',
+            },
+            id: {
+              type: 'string',
+              description: 'The widget id to show or hide in the side panel.',
+            },
+          },
+          required: ['side', 'title', 'id'],
+        },
+      },
     });
 
     const sidePanelMenu: { [area in SidePanel.Area]: IDisposable | null } = {
@@ -878,7 +1019,7 @@ const sidePanelVisibility: JupyterFrontEndPlugin<void> = {
           command: CommandIDs.togglePanel,
           args: {
             side: area,
-            title: `Show ${widget.title.caption}`,
+            title: widget.title.caption,
             id: widget.id,
           },
         });
@@ -962,6 +1103,20 @@ const sidePanelVisibility: JupyterFrontEndPlugin<void> = {
 };
 
 /**
+ * A plugin for defining keyboard shortcuts specific to the notebook application.
+ */
+const shortcuts: JupyterFrontEndPlugin<void> = {
+  id: '@jupyter-notebook/application-extension:shortcuts',
+  description:
+    'A plugin for defining keyboard shortcuts specific to the notebook application.',
+  autoStart: true,
+  activate: (app: JupyterFrontEnd) => {
+    // for now this plugin is mostly useful for defining keyboard shortcuts
+    // specific to the notebook application
+  },
+};
+
+/**
  * The default tree route resolver plugin.
  */
 const tree: JupyterFrontEndPlugin<JupyterFrontEnd.ITreeResolver> = {
@@ -998,6 +1153,17 @@ const tree: JupyterFrontEndPlugin<JupyterFrontEnd.ITreeResolver> = {
 
           delegate.resolve({ browser, file: PageConfig.getOption('treePath') });
         }) as (args: any) => Promise<void>,
+        describedBy: {
+          args: {
+            type: 'object',
+            properties: {
+              search: {
+                type: 'string',
+                description: 'The routed URL query string.',
+              },
+            },
+          },
+        },
       })
     );
     set.add(
@@ -1110,6 +1276,12 @@ const zen: JupyterFrontEndPlugin<void> = {
           toggleOff();
         }
       },
+      describedBy: {
+        args: {
+          type: 'object',
+          properties: {},
+        },
+      },
     });
 
     document.addEventListener('fullscreenchange', () => {
@@ -1125,10 +1297,28 @@ const zen: JupyterFrontEndPlugin<void> = {
 };
 
 /**
+ * A plugin providing a custom setting connector to override the default
+ * values of some of the JupyterLab plugin settings, for example to open
+ * the help (pager payloads) in the down area by default, like in the
+ * Classic Notebook.
+ */
+const settingsConnector: JupyterFrontEndPlugin<ISettingConnector> = {
+  id: '@jupyter-notebook/application-extension:settings-connector',
+  description:
+    'Provides a custom setting connector overriding some default setting values.',
+  autoStart: true,
+  provides: ISettingConnector,
+  activate: (app: JupyterFrontEnd): ISettingConnector => {
+    return new SettingConnector(app.serviceManager.settings);
+  },
+};
+
+/**
  * Export the plugins as default.
  */
 const plugins: JupyterFrontEndPlugin<any>[] = [
   dirty,
+  info,
   logo,
   menus,
   menuSpacer,
@@ -1137,8 +1327,10 @@ const plugins: JupyterFrontEndPlugin<any>[] = [
   pathOpener,
   paths,
   rendermime,
+  settingsConnector,
   shell,
   sidePanelVisibility,
+  shortcuts,
   splash,
   status,
   tabTitle,

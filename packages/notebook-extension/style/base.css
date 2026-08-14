@@ -16,6 +16,16 @@
   - compact view on mobile
 */
 
+/* Make the notebook take up the full width of the page when jp-mod-fullwidth is set */
+
+body[data-notebook='notebooks']
+  .jp-NotebookPanel.jp-mod-fullwidth
+  .jp-WindowedPanel-outer {
+  padding-left: unset;
+  padding-right: unset !important;
+  width: unset;
+}
+
 /* Keep the notebook centered on the page */
 
 body[data-notebook='notebooks'] .jp-NotebookPanel-toolbar {
@@ -43,8 +53,6 @@ body[data-notebook='notebooks'] .jp-WindowedPanel-inner {
 
 body[data-notebook='notebooks'] .jp-Notebook-cell {
   background: var(--jp-layout-color0);
-  padding-left: calc(2 * var(--jp-cell-padding));
-  padding-right: calc(2 * var(--jp-cell-padding));
 }
 
 /* Empty space at the bottom of the notebook (similar to classic) */
@@ -130,7 +138,6 @@ body[data-format='mobile'] .jp-ToolbarButton .jp-DebuggerBugButton {
 body[data-notebook='notebooks'] .jp-WindowedPanel-viewport {
   background: var(--jp-layout-color0);
   box-shadow: var(--jp-elevation-z4);
-  padding: unset;
 
   /* Extra padding at the top and bottom so the notebook looks nicer */
   padding-top: calc(2 * var(--jp-notebook-padding));
@@ -149,19 +156,6 @@ body[data-notebook='notebooks']
   left: 0;
   right: 0;
   box-shadow: 0px 0px 12px 1px var(--jp-shadow-umbra-color);
-}
-
-body[data-notebook='notebooks']
-  .jp-Notebook
-  .jp-Notebook-cell:not(:first-child)::after,
-body[data-notebook='notebooks']
-  .jp-Notebook
-  .jp-Notebook-cell:not(:first-child)::before {
-  content: ' ';
-  height: 100%;
-  position: absolute;
-  top: 0;
-  width: 11px;
 }
 
 /* Additional customizations of the components on the notebook page */

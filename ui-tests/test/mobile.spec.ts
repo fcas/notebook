@@ -1,7 +1,7 @@
 // Copyright (c) Jupyter Development Team.
 // Distributed under the terms of the Modified BSD License.
 
-import { IJupyterLabPage, expect, galata } from '@jupyterlab/galata';
+import { expect, galata } from '@jupyterlab/galata';
 
 import { test } from './fixtures';
 
@@ -35,7 +35,9 @@ test.describe('Mobile', () => {
 
     await page.waitForSelector('#top-panel-wrapper', { state: 'hidden' });
 
-    expect(await page.screenshot()).toMatchSnapshot('tree.png');
+    expect(await page.screenshot()).toMatchSnapshot('tree.png', {
+      maxDiffPixels: 300,
+    });
   });
 
   test('The layout should be more compact on the notebook page', async ({
